@@ -1,5 +1,9 @@
 #include <iostream>
+#include <memory>
+#include <stdexcept>
 #include <string>
+#include <type_traits>
+#include <utility>
 
 #include "notfall/result.h"
 
@@ -8,7 +12,7 @@ namespace {
 struct LifeTracker {
   int* tracker;
 
-  LifeTracker(int* ptr) : tracker(ptr) {
+  explicit LifeTracker(int* ptr) : tracker(ptr) {
     if (tracker) {
       (*tracker)++;
     }
@@ -20,7 +24,7 @@ struct LifeTracker {
     }
   }
 
-  LifeTracker(LifeTracker&& other) : tracker(other.tracker) {
+  LifeTracker(LifeTracker&& other) noexcept : tracker(other.tracker) {
     other.tracker = nullptr;
   }
 
@@ -31,9 +35,23 @@ struct LifeTracker {
   }
 };
 
+struct ThrowingType {
+  ThrowingType() {
+    throw std::runtime_error("Construction failed");
+  }
+
+  ThrowingType(const ThrowingType&) {
+    throw std::runtime_error("Copy failed");
+  }
+
+  ThrowingType(ThrowingType&&) {
+    throw std::runtime_error("Move failed");
+  }
+};
+
 void ThrowIfFailed(bool condition) {
   if (!condition) {
-    throw std::exception();
+    throw std::runtime_error("Test assertion failed");
   }
 }
 
@@ -65,6 +83,7 @@ void TestAccessorsAndOperators() {
 
   notfall::Result<std::string, int> result(
       notfall::Some(std::string("Minecraft")));
+
   ThrowIfFailed(*result == "Minecraft");
   ThrowIfFailed(result->length() == 9);
 
@@ -73,11 +92,13 @@ void TestAccessorsAndOperators() {
   ThrowIfFailed(cref->length() == 9);
 
   notfall::Result<std::string, int> error_only(notfall::Error(404));
+
   try {
     (void)error_only.Value();
-    ThrowIfFailed(false);  // Should not reach here.
+    ThrowIfFailed(false);
   } catch (const std::runtime_error& ex) {
-    std::cerr << "\tCaught an EXPECTED exception: " << ex.what() << '\n';
+    std::cerr << "\tCaught expected exception: "
+              << ex.what() << '\n';
   }
 
   std::cout << "\tComplete!\n";
@@ -91,8 +112,6 @@ void TestCopySemantics() {
   notfall::Result<int, std::string> copy_constructor(original);
   ThrowIfFailed(copy_constructor.HasValue());
   ThrowIfFailed(copy_constructor.Value() == 100);
-
-  // Check whether the original was left untouched.
   ThrowIfFailed(original.HasValue());
 
   notfall::Result<int, std::string> target(notfall::Some(4));
@@ -101,6 +120,7 @@ void TestCopySemantics() {
 
   notfall::Result<int, std::string> error_target(
       notfall::Error(std::string("Some error")));
+
   error_target = original;
   ThrowIfFailed(error_target.HasValue());
   ThrowIfFailed(error_target.Value() == 100);
@@ -118,12 +138,12 @@ void TestMoveSemantics() {
   ThrowIfFailed(moved_constructor.HasValue());
   ThrowIfFailed(moved_constructor.Value() == "ChunkData");
 
-  // Verify that the source transitioned to an empty state safely.
   ThrowIfFailed(!source.HasValue());
   ThrowIfFailed(!source.HasError());
 
   notfall::Result<std::string, int> destination(notfall::Error(500));
   destination = std::move(moved_constructor);
+
   ThrowIfFailed(destination.HasValue());
   ThrowIfFailed(destination.Value() == "ChunkData");
 
@@ -134,21 +154,21 @@ void TestMoveSemantics() {
 }
 
 void TestLifecycleTracking() {
-  std::cout << "[TEST] Destructor Cleanup & Leak Prevention (LifeTracker)...\n";
+  std::cout << "[TEST] Destructor Cleanup & Leak Prevention...\n";
 
   int active_instances = 0;
 
   {
     notfall::Result<LifeTracker, int> result{
         notfall::Some(LifeTracker(&active_instances))};
+
     ThrowIfFailed(active_instances == 1);
 
     {
       notfall::Result<LifeTracker, int> moved(std::move(result));
+
       ThrowIfFailed(!result.HasValue());
       ThrowIfFailed(!result.HasError());
-
-      // The active instance count should remain 1 because ownership moved.
       ThrowIfFailed(active_instances == 1);
     }
 
@@ -160,18 +180,167 @@ void TestLifecycleTracking() {
   std::cout << "\tComplete!\n";
 }
 
+void TestErrorLifecycle() {
+  std::cout << "[TEST] Error State Lifecycle...\n";
+
+  int active_instances = 0;
+
+  {
+    notfall::Result<LifeTracker, LifeTracker> result(
+        notfall::Error<LifeTracker>{ LifeTracker(&active_instances) });
+
+    ThrowIfFailed(result.HasError());
+    ThrowIfFailed(active_instances == 1);
+
+    {
+      auto copy(result);
+      ThrowIfFailed(copy.HasError());
+      ThrowIfFailed(active_instances == 2);
+
+      auto moved(std::move(copy));
+
+      ThrowIfFailed(moved.HasError());
+      ThrowIfFailed(!copy.HasValue());
+      ThrowIfFailed(!copy.HasError());
+      ThrowIfFailed(active_instances == 2);
+    }
+
+    ThrowIfFailed(active_instances == 1);
+  }
+
+  ThrowIfFailed(active_instances == 0);
+
+  std::cout << "\tComplete!\n";
+}
+
+void TestCrossStateAssignment() {
+  std::cout << "[TEST] Cross-State Assignment...\n";
+
+  notfall::Result<int, std::string> result(notfall::Some(42));
+
+  result = notfall::Error(std::string("Failure"));
+  ThrowIfFailed(result.HasError());
+  ThrowIfFailed(result.Error() == "Failure");
+
+  result = notfall::Some(100);
+  ThrowIfFailed(result.HasValue());
+  ThrowIfFailed(result.Value() == 100);
+
+  std::cout << "\tComplete!\n";
+}
+
+void TestSelfAssignment() {
+  std::cout << "[TEST] Self-Assignment...\n";
+
+  notfall::Result<int, std::string> result(notfall::Some(42));
+
+  result = result;
+  ThrowIfFailed(result.HasValue());
+  ThrowIfFailed(result.Value() == 42);
+
+  result = std::move(result);
+  ThrowIfFailed(result.HasValue());
+  ThrowIfFailed(result.Value() == 42);
+
+  notfall::Result<int, std::string> error(
+      notfall::Error(std::string("Failure")));
+
+  error = error;
+  ThrowIfFailed(error.HasError());
+
+  error = std::move(error);
+  ThrowIfFailed(error.HasError());
+
+  std::cout << "\tComplete!\n";
+}
+
+void TestMoveOnlyTypes() {
+  std::cout << "[TEST] Move-Only Types...\n";
+
+  notfall::Result<std::unique_ptr<int>, int> result(
+      notfall::Some(std::make_unique<int>(42)));
+
+  auto moved(std::move(result));
+
+  ThrowIfFailed(moved.HasValue());
+  ThrowIfFailed(*moved.Value() == 42);
+  ThrowIfFailed(!result.HasValue());
+  ThrowIfFailed(!result.HasError());
+
+  std::cout << "\tComplete!\n";
+}
+
+void TestExceptionSafety() {
+  std::cout << "[TEST] Exception Safety...\n";
+
+  bool caught = false;
+
+  try {
+    notfall::Result<ThrowingType, int> result(
+        notfall::Some(ThrowingType{}));
+  } catch (const std::runtime_error&) {
+    caught = true;
+  }
+
+  ThrowIfFailed(caught);
+
+  std::cout << "\tComplete!\n";
+}
+
+void TestConstCorrectness() {
+  std::cout << "[TEST] Const Correctness...\n";
+
+  const notfall::Result<std::string, int> result(
+      notfall::Some(std::string("Minecraft")));
+
+  static_assert(std::is_same_v<
+      decltype(result.Value()),
+      const std::string&>);
+
+  ThrowIfFailed(result.Value() == "Minecraft");
+
+  std::cout << "\tComplete!\n";
+}
+
+void TestSameType() {
+  std::cout << "[TEST] Same Value & Error Types...\n";
+
+  notfall::Result<int, int> value(notfall::Some(42));
+  notfall::Result<int, int> error(notfall::Error(404));
+
+  ThrowIfFailed(value.HasValue());
+  ThrowIfFailed(value.Value() == 42);
+
+  ThrowIfFailed(error.HasError());
+  ThrowIfFailed(error.Error() == 404);
+
+  std::cout << "\tComplete!\n";
+}
+
 }  // namespace
 
 int main() {
   try {
     std::cout << "Starting tests...\n";
+
     TestFactoriesAndStates();
     TestAccessorsAndOperators();
     TestCopySemantics();
     TestMoveSemantics();
     TestLifecycleTracking();
-    std::cout << "All tests successfully passed!\n";
+    TestErrorLifecycle();
+    TestCrossStateAssignment();
+    TestSelfAssignment();
+    TestMoveOnlyTypes();
+    TestExceptionSafety();
+    TestConstCorrectness();
+    TestSameType();
+
+    std::cout << "\nAll tests successfully passed!\n";
   } catch (const std::exception& ex) {
-    std::cerr << ex.what() << '\n';
+    std::cerr << "\nTEST FAILURE: " << ex.what() << '\n';
+    return 1;
   }
+
+  return 0;
 }
