@@ -90,7 +90,7 @@ class Result {
     }
 
     state_ = other.state_;
-    other.state_ = State::kEmpty;
+    other.Destroy();
   }
 
   constexpr ~Result() { Destroy(); }
@@ -150,7 +150,7 @@ class Result {
       }
 
       state_ = other.state_;
-      other.state_ = State::kEmpty;
+      other.Destroy();
     }
 
     return *this;
@@ -260,6 +260,79 @@ class Result {
   State state_ = State::kEmpty;
   union {
     T value_;
+    E error_;
+  };
+};
+
+template <typename E>
+class Result<void, E> {
+ public:
+  static_assert(std::is_destructible_v<E>, "E must be destructible!");
+  static_assert(!std::is_void_v<E> && !std::is_reference_v<E>, "E must not be void or a reference!");
+
+  constexpr Result() noexcept = default;
+
+  template <typename E2 = E>
+  constexpr Result(Error<E2>&& error)
+      noexcept(std::is_nothrow_constructible_v<E, E2&&>) {
+    std::construct_at(std::addressof(error_), std::forward<E2>(error.error_));
+    state_ = State::kError;
+  }
+
+  constexpr ~Result() { Destroy(); }
+
+  constexpr Result(Result<void, E>&& other)
+      noexcept(std::is_nothrow_move_constructible_v<E>) {
+    if (other.HasError()) {
+      std::construct_at(std::addressof(error_), std::move(other.Error()));
+      state_ = State::kError;
+      other.Destroy();
+    }
+  }
+
+  constexpr bool HasValue() const noexcept { return state_ == State::kValue; }
+
+  constexpr bool HasError() const noexcept { return state_ == State::kError; }
+
+  constexpr explicit operator bool() const noexcept { return HasValue(); }
+
+  constexpr void Value() const {
+    if (state_ != State::kValue) {
+      throw std::runtime_error("Result<void, E> value access violation");
+    }
+  }
+
+  constexpr E& Error() & {
+    if (state_ != State::kError) {
+      throw std::runtime_error("Result<void, E> error value access violation");
+    }
+
+    return *std::launder(std::addressof(error_));
+  }
+
+  constexpr const E& Error() const & {
+    if (state_ != State::kError) {
+      throw std::runtime_error("Result<void, E> error value access violation");
+    }
+
+    return *std::launder(std::addressof(error_));
+  }
+
+ private:
+  enum class State {
+    kValue,
+    kError
+  };
+
+  constexpr void Destroy() {
+    if (state_ == State::kError) {
+      std::destroy_at(std::addressof(error_));
+      state_ = State::kValue;
+    }
+  }
+
+  State state_;
+  union {
     E error_;
   };
 };
