@@ -283,7 +283,7 @@ class Result<void, E> {
 
   constexpr Result(Result<void, E>&& other)
       noexcept(std::is_nothrow_move_constructible_v<E>) {
-    if (other.HasError()) {
+    if (other.state_ == State::kError) {
       std::construct_at(std::addressof(error_), std::move(other.Error()));
       state_ = State::kError;
       other.Destroy();
